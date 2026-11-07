@@ -1,0 +1,29 @@
+[Unit]
+Description=Scietex ADC service (SPI)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=registry.buro-nts.ru/scietex-adc-service:latest
+ContainerName=scietex-adc-service
+AutoUpdate=registry
+Environment=SCIETEX_SERVICE_NAME=AdcService
+Environment=SCIETEX_LOGGING_LEVEL=INFO
+EnvironmentFile=-%h/.config/scietex/adc.env
+# Bind mount rather than a named volume so adc/adc.yml stays hand-editable on
+# the host at ~/.config/scietex/adc/adc.yml.
+Volume=%h/.config/scietex:/config:z
+AddDevice=/dev/spidev0.0
+# The service only dials Valkey; it never listens. No PublishPort, no
+# NET_BIND_SERVICE.
+NoNewPrivileges=true
+ReadOnly=true
+Tmpfs=/tmp:rw,size=16m
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
