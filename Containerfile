@@ -9,10 +9,15 @@ FROM python:3.14-slim-trixie AS builder
 ARG VERSION
 
 # Backend extra to install alongside the core service: "spi" for spidev boards,
-# "gpiozero" for the plain-GPIO backend. Both ship manylinux wheels; the HAL is
-# pure Python, so no compiler is needed. If a future spidev release ever fails to
-# resolve a wheel, re-adding modbus's gcc/python3-dev apt block is the fallback.
+# "gpiozero" for the plain-GPIO backend.
 ARG EXTRAS="spi"
+
+# spidev publishes manylinux wheels only up to cp313, so on 3.14 pip builds it
+# from source. The interpreter headers ship with this image; only a C compiler is
+# missing. The builder stage is discarded, so the toolchain never reaches runtime.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
