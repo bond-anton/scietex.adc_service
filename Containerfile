@@ -27,17 +27,23 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Install the released package from PyPI. The image is a distribution channel of
 # the same tagged source that was published, so it does not build from the local
 # checkout.
-# Then slim the venv: pip/setuptools/wheel are build-time only, bytecode caches
-# are regenerated on first import, and valkey-glide ships one _fast_response
-# extension per supported interpreter (cp39..cp314, pypy) while only the running
-# interpreter's is ever loaded.
+# Then slim the venv: pip/setuptools/wheel are build-time only, and valkey-glide
+# ships one _fast_response extension per supported interpreter (cp39..cp314,
+# pypy) while only the running interpreter's is ever loaded.
+#
+# Bytecode is compiled here with unchecked-hash invalidation so the runtime
+# stage never writes a .pyc: a hash-based pyc is validated against the source
+# content, not its mtime, which is what makes the image safe on a read-only
+# rootfs (the runtime layer cannot be relied on to remember source mtimes).
 RUN pip install --no-cache-dir -U pip && \
     pip install --no-cache-dir "scietex.adc_service[${EXTRAS}]==${VERSION}" && \
     pip uninstall -y pip setuptools wheel && \
     find /opt/venv -name '*.pyc' -delete && \
     find /opt/venv -name '__pycache__' -type d -prune -exec rm -rf {} + && \
     find /opt/venv/lib/python3.14/site-packages/glide_shared -name '*.so' \
-        ! -name '*cpython-314*' ! -name 'libglide_ffi.so' -delete
+        ! -name '*cpython-314*' ! -name 'libglide_ffi.so' -delete && \
+    python -m compileall -q -f --invalidation-mode unchecked-hash \
+        /opt/venv/lib/python3.14/site-packages
 
 # Stage 2: Runtime image
 FROM python:3.14-slim-trixie
@@ -58,9 +64,16 @@ RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app && chmod -R 755 
 # namespaces its files under <config-dir>/adc/.
 # Neither this service nor the framework listens on a socket: the worker only
 # dials Valkey. There is no EXPOSE, no published port and no NET_BIND_SERVICE.
+#
+# The rootfs is meant to be run read-only: the only writable location is that
+# volume. Bytecode is precompiled in the builder stage, and these two variables
+# stop any straggling import from writing inside the image; the cache prefix
+# catches packages that ship without precompiled modules.
 ENV SCIETEX_CONFIG_DIR=/config \
     SCIETEX_SERVICE_NAME=AdcService \
-    SCIETEX_LOGGING_LEVEL=INFO
+    SCIETEX_LOGGING_LEVEL=INFO \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPYCACHEPREFIX=/tmp/pycache
 RUN mkdir -p /config && chown appuser:appuser /config
 VOLUME ["/config"]
 
