@@ -55,7 +55,7 @@ def test_real_mcp3208_builds_from_transport_without_io() -> None:
     assert device.closed is False
 
     assert device.channel(0).value == 0xABC
-    assert transport.calls == [[0x80 | 0x40, 0x00, 0x00]]
+    assert transport.calls == [[0x06, 0x00, 0x00]]
 
     device.close()
     assert transport.closed is True
