@@ -3,9 +3,11 @@
 import pytest
 
 from scietex.adc_service import devices
-from scietex.adc_service.config import AdcDeviceSettings, AdcServiceSettings
+from scietex.adc_service.config import AdcChannelSettings, AdcDeviceSettings, AdcServiceSettings
 from scietex.adc_service.devices import (
     ADC_PARTS,
+    MAX_INTERVAL_MS,
+    MIN_INTERVAL_MS,
     AdcDeviceRegistry,
     ChannelNotFound,
     DeviceNotFound,
@@ -15,6 +17,7 @@ from scietex.adc_service.devices import (
     UnknownDeviceType,
     UnknownParameter,
     build_adc,
+    poll_plan,
 )
 from scietex.hal import adc as hal
 
@@ -281,3 +284,126 @@ def test_registry_logs_close_failure(registry: AdcDeviceRegistry, fake_parts: No
     assert registry.generation == 2
     assert registry.get("adc0") is not failing
     assert registry.get("adc0").v_ref == 3.3
+
+
+def test_poll_plan_empty_channels_expands_every_input(registry: AdcDeviceRegistry, fake_parts: None) -> None:
+    """An empty ``channels`` list samples every single-ended input at the device period."""
+    registry.rebuild(AdcServiceSettings(devices={"adc0": AdcDeviceSettings(type="FAKE", poll_interval_ms=250)}))
+
+    plan = poll_plan(registry)
+
+    assert [entry.channel for entry in plan["adc0"]] == list(range(8))
+    assert {entry.interval_ms for entry in plan["adc0"]} == {250}
+    assert {entry.label for entry in plan["adc0"]} == {None}
+
+
+def test_poll_plan_explicit_rows_override_period_and_carry_labels(registry: AdcDeviceRegistry, fake_parts: None) -> None:
+    """A channel row wins over the device fallback and keeps its label."""
+    registry.rebuild(
+        AdcServiceSettings(
+            devices={
+                "adc0": AdcDeviceSettings(
+                    type="FAKE",
+                    poll_interval_ms=1000,
+                    channels=[
+                        AdcChannelSettings(channel=2, poll_interval_ms=100, label="cell"),
+                        AdcChannelSettings(channel=5),
+                    ],
+                )
+            }
+        )
+    )
+
+    plan = poll_plan(registry)["adc0"]
+
+    assert [(entry.channel, entry.interval_ms, entry.label) for entry in plan] == [
+        (2, 100, "cell"),
+        (5, 1000, None),
+    ]
+
+
+def test_poll_plan_drops_disabled_out_of_range_and_duplicate_rows(registry: AdcDeviceRegistry, fake_parts: None) -> None:
+    """A row that cannot be sampled is dropped instead of failing every tick."""
+    registry.rebuild(
+        AdcServiceSettings(
+            devices={
+                "adc0": AdcDeviceSettings(
+                    type="FAKE",
+                    channels=[
+                        AdcChannelSettings(channel=0),
+                        AdcChannelSettings(channel=0, poll_interval_ms=200),
+                        AdcChannelSettings(channel=1, enabled=False),
+                        AdcChannelSettings(channel=99),
+                    ],
+                )
+            }
+        )
+    )
+
+    plan = poll_plan(registry)["adc0"]
+
+    assert [(entry.channel, entry.interval_ms) for entry in plan] == [(0, 1000)]
+
+
+def test_poll_plan_skips_poll_false_and_disabled_service(registry: AdcDeviceRegistry, fake_parts: None) -> None:
+    """Neither a device opt-out nor the service switch produces a plan."""
+    settings = AdcServiceSettings(
+        devices={
+            "polled": AdcDeviceSettings(type="FAKE"),
+            "manual": AdcDeviceSettings(type="FAKE", poll=False),
+        }
+    )
+    registry.rebuild(settings)
+
+    assert list(poll_plan(registry)) == ["polled"]
+
+    registry.rebuild(
+        AdcServiceSettings(
+            devices={
+                "polled": AdcDeviceSettings(type="FAKE"),
+                "manual": AdcDeviceSettings(type="FAKE", poll=False),
+            },
+            poll_enabled=False,
+        )
+    )
+    assert poll_plan(registry) == {}
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (0, MIN_INTERVAL_MS),
+        (-50, MIN_INTERVAL_MS),
+        (100, 100),
+        (MAX_INTERVAL_MS + 1, MAX_INTERVAL_MS),
+    ],
+)
+def test_poll_plan_clamps_intervals(
+    registry: AdcDeviceRegistry,
+    fake_parts: None,
+    caplog: pytest.LogCaptureFixture,
+    configured: int,
+    expected: int,
+) -> None:
+    """A period outside the supported range degrades to the bound with a warning."""
+    registry.rebuild(
+        AdcServiceSettings(
+            devices={
+                "adc0": AdcDeviceSettings(
+                    type="FAKE",
+                    channels=[AdcChannelSettings(channel=0, poll_interval_ms=configured)],
+                )
+            }
+        )
+    )
+
+    plan = poll_plan(registry)["adc0"]
+
+    assert plan[0].interval_ms == expected
+    clamped = configured != expected
+    assert bool(caplog.records) is clamped
+
+
+def test_poll_plan_empty_before_first_rebuild(registry: AdcDeviceRegistry) -> None:
+    """No settings means no plan."""
+    assert poll_plan(registry) == {}

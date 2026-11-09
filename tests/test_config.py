@@ -9,6 +9,7 @@ from scietex.adc_service.config import (
     ADC_CONFIG_FILE,
     ADC_CONFIG_SUBDIR,
     ADC_SETTINGS_DEFAULTS,
+    AdcChannelSettings,
     AdcDeviceSettings,
     AdcServiceSettings,
     read_adc_config,
@@ -160,3 +161,66 @@ def test_poll_enabled_defaults_true() -> None:
     """Service-wide polling is on unless configured otherwise."""
     assert AdcServiceSettings().poll_enabled is True
     assert AdcServiceSettings().devices == {}
+
+
+def test_channel_settings_decode_from_yaml_shaped_dict() -> None:
+    """A channel row the API publishes decodes with every field present."""
+    channel = msgspec.convert(
+        {"channel": 3, "poll_interval_ms": 250, "enabled": False, "label": "cell"},
+        AdcChannelSettings,
+    )
+
+    assert channel.channel == 3
+    assert channel.poll_interval_ms == 250
+    assert channel.enabled is False
+    assert channel.label == "cell"
+
+
+def test_channel_settings_defaults() -> None:
+    """Only ``channel`` is required; period, enablement, and label default."""
+    channel = AdcChannelSettings(channel=0)
+
+    assert channel.poll_interval_ms == 1000
+    assert channel.enabled is True
+    assert channel.label is None
+
+
+def test_channel_settings_reject_unknown_field() -> None:
+    """A field the worker does not know fails the whole apply, not silently."""
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.convert({"channel": 0, "interval": 100}, AdcChannelSettings)
+
+
+def test_device_poll_defaults_and_channels() -> None:
+    """A device entry without polling fields samples every input every second."""
+    device = msgspec.convert({"type": "MCP3208"}, AdcDeviceSettings)
+
+    assert device.poll is True
+    assert device.poll_interval_ms == 1000
+    assert device.channels == []
+
+
+def test_service_poll_defaults() -> None:
+    """The service-wide polling knobs mirror the VFD domain defaults."""
+    settings = AdcServiceSettings()
+
+    assert settings.poll_enabled is True
+    assert settings.failure_threshold == 3
+    assert settings.stream_maxlen == 10000
+
+
+def test_channels_round_trip_through_yaml() -> None:
+    """A per-channel plan survives YAML, including the disabled rows."""
+    settings = AdcServiceSettings(
+        devices={
+            "adc0": AdcDeviceSettings(
+                type="MCP3208",
+                channels=[AdcChannelSettings(channel=0, poll_interval_ms=100), AdcChannelSettings(channel=1, enabled=False)],
+            )
+        }
+    )
+
+    decoded = msgspec.yaml.decode(msgspec.yaml.encode(settings), type=AdcServiceSettings)
+
+    assert decoded == settings
+    assert decoded.devices["adc0"].channels[1].enabled is False

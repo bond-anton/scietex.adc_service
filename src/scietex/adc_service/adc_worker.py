@@ -34,6 +34,7 @@ from .config import (
     read_adc_config,
 )
 from .devices import AdcDeviceRegistry
+from .poller import AdcPoller
 from .task_handlers import AdcListHandler, AdcReadAllHandler, AdcReadHandler
 from .telemetry import TELEMETRY_INTERVAL, TELEMETRY_TTL, build_telemetry
 
@@ -45,6 +46,22 @@ class AdcWorker(ValkeyWorker):
         super().__init__(config, client_factory=client_factory, theme=theme)
         self._settings: AdcServiceSettings | None = None
         self._devices = AdcDeviceRegistry(self.logger)
+        # One poll task per sampled device, owned by the poller. Device reads
+        # are blocking bus transactions, so the poller and the read handlers
+        # share `AdcDeviceRegistry.read_lock`.
+        self._poller = AdcPoller(
+            self._devices,
+            self.logger,
+            service_name=self.service_name,
+            instance_id=self.instance_id,
+            client_provider=lambda: self.client,
+            report_failure=self._health.report_failure,
+        )
+        # A post-startup apply schedules an async reload because the framework
+        # invokes the hook inline: the poll tasks must be stopped (and awaited)
+        # before the device objects they read from are closed.
+        self._pending_settings: AdcServiceSettings | None = None
+        self._reload_task: asyncio.Task[None] | None = None
         # The apply hook runs during ``initialize`` (L2/L3 delivery) and at
         # runtime. False until ``initialize`` finishes so the hook does not
         # rebuild the registry twice on startup; ``initialize`` rebuilds once
@@ -77,6 +94,11 @@ class AdcWorker(ValkeyWorker):
         """The live device registry shared with the task handlers."""
         return self._devices
 
+    @property
+    def poller(self) -> AdcPoller:
+        """The poll loop owner, read by the telemetry builder."""
+        return self._poller
+
     async def initialize(self) -> bool:
         """Initialize the framework, then open every configured device.
 
@@ -107,32 +129,78 @@ class AdcWorker(ValkeyWorker):
             self.logger.error("Failed to build the ADC device registry: %s", exc)
             return False
         self._settings = settings
+        self._poller.configure(settings)
+        await self._poller.start()
         self._startup_complete = True
         return True
 
     async def cleanup(self) -> None:
-        """Close every open device, then the framework resources."""
+        """Stop the poll loops, close every open device, then the framework resources."""
         self._startup_complete = False
+        if self._reload_task is not None:
+            self._reload_task.cancel()
+            await asyncio.gather(self._reload_task, return_exceptions=True)
+            self._reload_task = None
+        await self._poller.stop()
         self._devices.close()
         await super().cleanup()
 
     def _apply_adc_settings(self, settings: AdcServiceSettings) -> None:
-        """Store merged settings and rebuild the live devices.
+        """Store merged settings and schedule a device rebuild.
 
         The hook is synchronous (the framework invokes it inline, before the
-        core swap), and `AdcDeviceRegistry.rebuild` is synchronous by design.
-        During startup the hook only stores: `initialize` rebuilds once from
-        the final merged settings to avoid opening every device twice.
+        core swap), but a rebuild must stop and await the poll tasks before the
+        device objects they read from are closed, so the reload runs as a
+        scheduled coroutine. During startup the hook only stores:
+        `initialize` rebuilds once from the final merged settings to avoid
+        opening every device twice.
 
-        A registry-wide failure propagates, which the framework reports as a
-        failed apply; per-device failures are recorded in the registry and
-        leave the apply successful.
+        A per-device failure is recorded in the registry and leaves the apply
+        successful; the device keeps its telemetry entry as ``error``.
         """
         if not self._startup_complete:
             self._settings = settings
             return
-        self._devices.rebuild(settings)
-        self._settings = settings
+        self._pending_settings = settings
+        self._schedule_reload()
+
+    def _schedule_reload(self) -> None:
+        """Ensure exactly one reload coroutine is pending.
+
+        Settings are coalesced: an apply that lands while a reload is running
+        leaves ``_pending_settings`` set and the running loop picks it up, so
+        two rapid applies rebuild once, from the newest settings.
+        """
+        if self._reload_task is not None and not self._reload_task.done():
+            return
+        self._reload_task = asyncio.get_running_loop().create_task(
+            self._reload_devices(),
+            name="adc-config-reload",
+        )
+
+    async def _reload_devices(self) -> None:
+        """Rebuild the registry and restart the poll loops for pending settings.
+
+        Cancel + await the poll tasks first: a blocking SPI transaction cannot
+        be interrupted, and closing the device underneath one corrupts the
+        frame. A registry-wide rebuild failure is logged and the newest
+        settings are still adopted, so the poller restarts on whatever
+        devices remain instead of sampling a dead generation.
+        """
+        try:
+            while self._pending_settings is not None:
+                settings = self._pending_settings
+                self._pending_settings = None
+                await self._poller.stop()
+                try:
+                    self._devices.rebuild(settings)
+                except Exception:
+                    self.logger.exception("Failed to rebuild the ADC device registry")
+                self._settings = settings
+                self._poller.configure(settings)
+                await self._poller.start()
+        finally:
+            self._reload_task = None
 
     @Manager(name="Telemetry")
     async def telemetry_loop(self) -> None:

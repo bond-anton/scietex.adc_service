@@ -14,6 +14,7 @@ from scietex.adc_service.config import (
     AdcDeviceSettings,
     AdcServiceSettings,
 )
+from scietex.adc_service.telemetry import build_telemetry
 from scietex.service import TaskProcessor, ValkeyWorker, ValkeyWorkerConfig
 from scietex.service.config_reload import ConfigApplyOutcome
 
@@ -140,11 +141,13 @@ def test_apply_hook_stores_without_rebuild_before_startup(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_apply_hook_rebuilds_after_startup(tmp_path, fake_parts, fake_bootstrap, skip_valkey) -> None:
-    """A config delivery after startup rebuilds the live registry."""
+    """A config delivery after startup rebuilds the live registry and poll tasks."""
     fake_bootstrap({"devices": {"a": {"type": "FAKE"}}})
     worker = _make_worker(tmp_path)
     assert await worker.initialize() is True
     assert worker.devices.generation == 1
+    old_tasks = list(worker.poller.tasks.values())
+    assert len(old_tasks) == 1
 
     applied = AdcServiceSettings(
         devices={
@@ -153,11 +156,39 @@ async def test_apply_hook_rebuilds_after_startup(tmp_path, fake_parts, fake_boot
         }
     )
     worker._apply_adc_settings(applied)
+    assert worker._reload_task is not None
+    await worker._reload_task
 
     assert worker.adc_settings is applied
     assert worker.devices.generation == 2
     assert worker.devices.ids() == ["a", "b"]
     assert worker.devices.get("b").v_ref == 5.0
+    assert all(task.done() for task in old_tasks)
+    assert list(worker.poller.tasks) == ["a", "b"]
+    await worker.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_apply_keeps_unbuildable_device_in_telemetry(tmp_path, fake_parts, fake_bootstrap, skip_valkey) -> None:
+    """A device that fails to build gets no poll task but stays as an error entry."""
+    fake_bootstrap({"devices": {"good": {"type": "FAKE"}}})
+    worker = _make_worker(tmp_path)
+    assert await worker.initialize() is True
+
+    worker._apply_adc_settings(
+        AdcServiceSettings(
+            devices={
+                "good": AdcDeviceSettings(type="FAKE"),
+                "bad": AdcDeviceSettings(type="BROKEN"),
+            }
+        )
+    )
+    await worker._reload_task
+
+    assert list(worker.poller.tasks) == ["good"]
+    payload = build_telemetry(worker)
+    assert payload["devices"]["bad"]["state"] == "error"
+    assert "SPI bus is gone" in payload["devices"]["bad"]["last_error"]
     await worker.cleanup()
 
 

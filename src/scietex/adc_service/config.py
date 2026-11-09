@@ -40,6 +40,22 @@ ADC_CONFIG_SUBDIR: str = "adc"
 ADC_CONFIG_FILE: str = "adc.yml"
 
 
+class AdcChannelSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """One sampled input of a device, keyed by its index in the part's geometry.
+
+    ``channel`` is the single-ended input index (the same number ``adc:read``
+    takes). ``poll_interval_ms`` is the per-channel sampling period; the device
+    field of the same name is the fallback for a channel with no explicit row.
+    ``enabled=False`` keeps the input readable on demand while excluding it
+    from the poll plan.
+    """
+
+    channel: int
+    poll_interval_ms: int = 1000
+    enabled: bool = True
+    label: str | None = None
+
+
 class AdcDeviceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """One SPI ADC device, keyed by its id in `AdcServiceSettings.devices`.
 
@@ -50,8 +66,11 @@ class AdcDeviceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True)
     require. ``None`` means "not configured": the constructor default applies.
 
     ``poll`` is service-level, not a HAL argument: it excludes a device from
-    `AdcDeviceRegistry.poll_targets` while keeping it addressable for on-demand
-    reads.
+    `devices.poll_plan` while keeping it addressable for on-demand reads.
+
+    ``poll_interval_ms`` is the sampling period for a channel that has no
+    explicit `AdcChannelSettings` row; an empty ``channels`` list samples every
+    input the HAL part reports at that period.
     """
 
     type: str
@@ -65,6 +84,8 @@ class AdcDeviceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True)
     label: str | None = None
     log_level: str | None = None
     poll: bool = True
+    poll_interval_ms: int = 1000
+    channels: list[AdcChannelSettings] = msgspec.field(default_factory=list)
 
 
 class AdcServiceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -72,10 +93,16 @@ class AdcServiceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True
 
     ``poll_enabled`` is the service-wide polling switch; a device additionally
     opts out through `AdcDeviceSettings.poll`.
+
+    ``failure_threshold`` is the number of consecutive failed reads before a
+    device is reported as ``error`` in telemetry. ``stream_maxlen`` caps the
+    entries retained per readings stream.
     """
 
     devices: dict[str, AdcDeviceSettings] = msgspec.field(default_factory=dict)
     poll_enabled: bool = True
+    failure_threshold: int = 3
+    stream_maxlen: int = 10000
 
 
 #: Concrete L0 base for the framework's layered merge. A field absent from every

@@ -18,7 +18,7 @@ from scietex.service.task_handler import (
     TaskResult,
 )
 
-from ..devices import AdcDeviceRegistry
+from ..devices import AdcDeviceRegistry, read_all_channels, read_channel
 from ._request import decode_request, error_result, ok_result
 
 #: Task name for a single-channel read.
@@ -26,16 +26,6 @@ ADC_READ_TASK_NAME = "adc:read"
 
 #: Task name for a full single-ended sweep.
 ADC_READ_ALL_TASK_NAME = "adc:read_all"
-
-#: 12-bit converter full scale; also the voltage divisor (DS21298E §4.2).
-_FULL_SCALE = 1 << 12
-
-
-def voltage(code: int, v_ref: float | None) -> float | None:
-    """Scale a raw code by ``v_ref``; ``None`` when the scaling is unknown."""
-    if v_ref is None:
-        return None
-    return code * v_ref / _FULL_SCALE
 
 
 class AdcReadRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -124,22 +114,21 @@ class AdcReadHandler(TaskHandler):
         """Read one input or differential pair and scale it in volts."""
         try:
             request = decode_request(task_data, AdcReadRequest)
-            device = self._devices.get(request.device_id)
-            if request.differential:
-                channel = self._devices.differential_channel(request.device_id, request.channel)
-            else:
-                channel = self._devices.channel(request.device_id, request.channel)
-            code = channel.value
-            volts = voltage(code, device.v_ref)
+            reading = await read_channel(
+                self._devices,
+                request.device_id,
+                request.channel,
+                differential=request.differential,
+            )
         except Exception as exc:
             return error_result(exc)
         return ok_result(
             AdcReadResponse(
-                device_id=request.device_id,
-                channel=request.channel,
-                differential=request.differential,
-                code=code,
-                voltage=volts,
+                device_id=reading.device_id,
+                channel=reading.channel,
+                differential=reading.differential,
+                code=reading.code,
+                voltage=reading.voltage,
             )
         )
 
@@ -175,16 +164,13 @@ class AdcReadAllHandler(TaskHandler):
         """
         try:
             request = decode_request(task_data, AdcReadAllRequest)
-            device = self._devices.get(request.device_id)
-            codes = device.read_all()
-            v_ref = device.v_ref
-            volts = [voltage(code, v_ref) for code in codes]
+            codes, volts = await read_all_channels(self._devices, request.device_id)
         except Exception as exc:
             return error_result(exc)
         return ok_result(
             AdcReadAllResponse(
                 device_id=request.device_id,
-                codes=list(codes),
+                codes=codes,
                 voltages=volts,
             )
         )

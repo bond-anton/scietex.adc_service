@@ -1,14 +1,15 @@
 """Minimal worker and Valkey-client doubles for telemetry tests.
 
 `build_telemetry` reads only ``service_name``, ``instance_id``,
-``adc_settings``, and ``devices``, so a real `AdcWorker` is unnecessary for
-payload-shape tests. The client double records the single ``set`` call the
-Telemetry manager makes.
+``adc_settings``, ``devices``, and ``poller``, so a real `AdcWorker` is
+unnecessary for payload-shape tests. The client double records the single
+``set`` call the Telemetry manager makes.
 """
 
 import logging
 
 from scietex.adc_service.devices import AdcDeviceRegistry
+from scietex.adc_service.poller import AdcPoller
 
 
 class FakeAdcWorker:
@@ -19,6 +20,7 @@ class FakeAdcWorker:
         *,
         settings=None,
         registry: AdcDeviceRegistry | None = None,
+        poller: AdcPoller | None = None,
         service_name: str = "adc-test",
         instance_id: str = "instance-1",
     ) -> None:
@@ -27,6 +29,16 @@ class FakeAdcWorker:
         self.adc_settings = settings
         self.devices = (
             registry if registry is not None else AdcDeviceRegistry(logging.getLogger("test.adc_service.fake_worker"))
+        )
+        self.poller = (
+            poller
+            if poller is not None
+            else AdcPoller(
+                self.devices,
+                logging.getLogger("test.adc_service.fake_worker.poller"),
+                service_name=service_name,
+                instance_id=instance_id,
+            )
         )
 
 

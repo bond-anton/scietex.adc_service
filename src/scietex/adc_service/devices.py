@@ -8,10 +8,15 @@ settings change, and records a per-device failure in `errors` rather than
 raising, so one unplugged converter never keeps the rest of the service from
 starting.
 
-The registry is synchronous and not thread-safe: the worker drives it from one
-task, and the HAL reads are blocking bus transactions by design.
+`poll_plan` turns the settings plus the live geometry into the per-device,
+per-channel sampling plan the poll loop consumes. `read_channel` and
+`read_all_channels` are the only paths that touch a converter: they take the
+per-device lock so a polled reading and an on-demand task never interleave two
+SPI transactions on one chip select. The registry itself stays synchronous and
+not thread-safe; the HAL reads are blocking bus transactions by design.
 """
 
+import asyncio
 import inspect
 import logging
 from collections.abc import Mapping
@@ -20,6 +25,17 @@ from dataclasses import dataclass
 from scietex.hal import adc as hal
 
 from .config import AdcDeviceSettings, AdcServiceSettings
+
+#: 12-bit converter full scale; also the voltage divisor (DS21298E §4.2).
+FULL_SCALE: int = 1 << 12
+
+#: Hard bounds on a sampling period. Below 100 ms one converter's blocking
+#: transaction would starve the event loop; above an hour the cadence is
+#: indistinguishable from polling being off.
+MIN_INTERVAL_MS: int = 100
+MAX_INTERVAL_MS: int = 3_600_000
+
+_LOG = logging.getLogger(__name__)
 
 
 class DeviceConfigError(ValueError):
@@ -188,6 +204,10 @@ class AdcDeviceRegistry:
         self._errors: dict[str, str] = {}
         self._settings: AdcServiceSettings | None = None
         self._generation = 0
+        # One bus lock per device id, shared by the poll loop and the task
+        # handlers. An SPI transaction is not re-entrant on a chip select, so
+        # two readers of the same converter must queue, not interleave.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     @property
     def errors(self) -> Mapping[str, str]:
@@ -316,3 +336,194 @@ class AdcDeviceRegistry:
             for device_id, cfg in self._settings.devices.items()
             if cfg.poll and device_id in self._devices
         ]
+
+    def read_lock(self, device_id: str) -> asyncio.Lock:
+        """Return the bus lock serializing reads of ``device_id``.
+
+        The lock is created on first use and kept across rebuilds: a rebuild
+        runs only after the poll tasks are stopped, so no reader is holding it
+        when the device object is replaced.
+        """
+        lock = self._locks.get(device_id)
+        if lock is None:
+            lock = self._locks[device_id] = asyncio.Lock()
+        return lock
+
+
+def voltage(code: int, v_ref: float | None) -> float | None:
+    """Scale a raw code by ``v_ref``; ``None`` when the scaling is unknown."""
+    if v_ref is None:
+        return None
+    return code * v_ref / FULL_SCALE
+
+
+@dataclass(frozen=True)
+class ChannelReading:
+    """One sampled input: the raw code and the code scaled by the reference."""
+
+    device_id: str
+    channel: int
+    differential: bool
+    code: int
+    voltage: float | None
+
+
+async def read_channel(
+    registry: AdcDeviceRegistry,
+    device_id: str,
+    index: int,
+    *,
+    differential: bool = False,
+) -> ChannelReading:
+    """Read one input under the device's bus lock.
+
+    This is the single read path shared by the poll loop and ``adc:read``, so
+    a polled and an on-demand value come from the same accessor and the same
+    scaling. The device is resolved before the lock is taken, so an unknown or
+    unavailable id never waits behind a slow bus transaction.
+
+    Raises:
+        DeviceNotFound: No device is configured under ``device_id``.
+        DeviceUnavailable: The device is configured but not open.
+        ChannelNotFound: The device has no input at ``index``.
+    """
+    registry.get(device_id)
+    async with registry.read_lock(device_id):
+        device = registry.get(device_id)
+        if differential:
+            channel = registry.differential_channel(device_id, index)
+        else:
+            channel = registry.channel(device_id, index)
+        code = channel.value
+        volts = voltage(code, device.v_ref)
+    return ChannelReading(
+        device_id=device_id,
+        channel=index,
+        differential=differential,
+        code=code,
+        voltage=volts,
+    )
+
+
+async def read_all_channels(
+    registry: AdcDeviceRegistry,
+    device_id: str,
+) -> tuple[list[int], list[float | None]]:
+    """Sweep every single-ended input of ``device_id`` under the bus lock.
+
+    `ADC.read_all()` is one device-level operation, so the sweep stays a single
+    transaction; only the voltage scaling is repeated per channel, with one
+    reference read so every value in the answer agrees.
+    """
+    registry.get(device_id)
+    async with registry.read_lock(device_id):
+        device = registry.get(device_id)
+        codes = device.read_all()
+        v_ref = device.v_ref
+        volts = [voltage(code, v_ref) for code in codes]
+    return list(codes), volts
+
+
+@dataclass(frozen=True)
+class AdcChannelPlan:
+    """One channel the poll loop samples: index, period, and display label."""
+
+    channel: int
+    interval_ms: int
+    label: str | None = None
+
+
+def poll_plan(
+    registry: AdcDeviceRegistry,
+    logger: logging.Logger | None = None,
+) -> dict[str, list[AdcChannelPlan]]:
+    """Expand the settings and the live geometry into the sampling plan.
+
+    The device subset comes from `AdcDeviceRegistry.poll_targets`, so a device
+    with ``poll=False``, an unopened device, and (service-wide)
+    ``poll_enabled=False`` never reach the plan. Per device:
+
+    * an empty ``channels`` list samples every single-ended input the HAL part
+      reports, at the device ``poll_interval_ms``;
+    * an explicit channel row overrides that period and an ``enabled=False``
+      row is dropped;
+    * a row naming an input the part does not have is dropped with a warning,
+      because it could only fail on every tick;
+    * every period is clamped to ``[MIN_INTERVAL_MS, MAX_INTERVAL_MS]`` with a
+      warning, so a misconfigured value degrades instead of starving the loop.
+
+    Args:
+        registry: The registry holding the live devices and the settings they
+            were built from.
+        logger: Destination for clamp and drop warnings; the module logger
+            when omitted.
+
+    Returns:
+        Device id -> channels to sample. A device with no sampleable input is
+        absent, and so is every device when polling is disabled.
+    """
+    settings = registry.settings
+    if settings is None or not settings.poll_enabled:
+        return {}
+    log = logger if logger is not None else _LOG
+    plan: dict[str, list[AdcChannelPlan]] = {}
+    for device_id, device in registry.poll_targets():
+        cfg = settings.devices[device_id]
+        channels = _device_plan(device_id, device, cfg, log)
+        if channels:
+            plan[device_id] = channels
+    return plan
+
+
+def _device_plan(
+    device_id: str,
+    device: hal.ADC,
+    cfg: AdcDeviceSettings,
+    logger: logging.Logger,
+) -> list[AdcChannelPlan]:
+    """Per-channel plan for one open device, with clamping and drops applied."""
+    limit = len(device.channels)
+    if not cfg.channels:
+        interval = _clamp_interval(device_id, cfg.poll_interval_ms, logger)
+        return [AdcChannelPlan(channel, interval) for channel in range(limit)]
+
+    plans: list[AdcChannelPlan] = []
+    seen: set[int] = set()
+    for entry in cfg.channels:
+        if not entry.enabled:
+            continue
+        if entry.channel in seen:
+            logger.warning("Device %s: duplicate channel %d row ignored", device_id, entry.channel)
+            continue
+        if not 0 <= entry.channel < limit:
+            logger.warning(
+                "Device %s: channel %d is outside the part's %d single-ended inputs",
+                device_id,
+                entry.channel,
+                limit,
+            )
+            continue
+        seen.add(entry.channel)
+        plans.append(
+            AdcChannelPlan(
+                channel=entry.channel,
+                interval_ms=_clamp_interval(device_id, entry.poll_interval_ms, logger),
+                label=entry.label,
+            )
+        )
+    return plans
+
+
+def _clamp_interval(device_id: str, interval_ms: int, logger: logging.Logger) -> int:
+    """Clamp one sampling period into the supported range, warning on a change."""
+    clamped = min(max(interval_ms, MIN_INTERVAL_MS), MAX_INTERVAL_MS)
+    if clamped != interval_ms:
+        logger.warning(
+            "Device %s: poll_interval_ms=%d is outside [%d, %d]; using %d",
+            device_id,
+            interval_ms,
+            MIN_INTERVAL_MS,
+            MAX_INTERVAL_MS,
+            clamped,
+        )
+    return clamped
