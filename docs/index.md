@@ -98,13 +98,14 @@ one response is scaled with the same value.
 The worker publishes to
 `scietex:AdcService:<instance_id>:telemetry` — msgpack, every 2.0 s, with a 6 s
 TTL (so a single missed beat does not expire the key). The snapshot lists every
-configured device with its open state, `v_ref`, channel counts, and `poll` flag,
-plus the service-wide `poll_enabled` switch.
+configured device with its open state, `v_ref`, `channel_count`, and `poll` flag,
+plus the service-wide `poll_enabled` switch. `channel_count` is the opened
+part's single-ended input count and is absent for a device that failed to open.
 
 Polling is opt-out in two places: `poll: false` on a device entry excludes it
 from the background sweep while keeping it readable on demand, and
 `poll_enabled: false` disables the sweep globally, so no polled channel data is
-published.
+published. A device also stays silent until it has explicit `channels` rows.
 
 ## Documentation
 

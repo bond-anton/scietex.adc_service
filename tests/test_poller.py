@@ -61,12 +61,11 @@ class FakeClock:
         self.ms += round(delay_s * 1000)
 
 
-def _settings(*channels: AdcChannelSettings, interval_ms: int = 1000, **service) -> AdcServiceSettings:
+def _settings(*channels: AdcChannelSettings, **service) -> AdcServiceSettings:
     return AdcServiceSettings(
         devices={
             "adc0": AdcDeviceSettings(
                 type="FAKE",
-                poll_interval_ms=interval_ms,
                 channels=list(channels),
             )
         },
@@ -169,7 +168,7 @@ async def test_per_channel_cadence_publishes_to_each_stream(fake_parts) -> None:
 @pytest.mark.asyncio
 async def test_failed_read_backs_off_and_publishes_nothing(fake_parts) -> None:
     """A failing channel is retried exponentially and never published."""
-    settings = _settings(AdcChannelSettings(channel=0), interval_ms=1000, failure_threshold=3)
+    settings = _settings(AdcChannelSettings(channel=0), failure_threshold=3)
     client = RecordingStreamClient()
     poller, registry = _poller(settings, client)
     registry.get("adc0").channels = (FailingChannel(OSError("bus error")),)
@@ -200,7 +199,7 @@ async def test_failed_read_backs_off_and_publishes_nothing(fake_parts) -> None:
 @pytest.mark.asyncio
 async def test_success_after_failure_publishes_and_resets(fake_parts) -> None:
     """A recovered bus read resets the counter and resumes the stream."""
-    settings = _settings(AdcChannelSettings(channel=0), interval_ms=1000, failure_threshold=2)
+    settings = _settings(AdcChannelSettings(channel=0), failure_threshold=2)
     client = RecordingStreamClient()
     poller, registry = _poller(settings, client)
     channel = FakeAdcChannel(0, code=5, v_ref=3.3)
@@ -237,15 +236,13 @@ async def test_no_task_for_poll_false_device(fake_parts) -> None:
     await poller.stop()
 
 
-def test_plan_expands_empty_channels_to_all_inputs(fake_parts) -> None:
-    """An explicit-channel plan is what the loop consumes; sanity-check the seam."""
-    settings = _settings(interval_ms=250)
+def test_plan_has_no_entry_without_channel_rows(fake_parts) -> None:
+    """A device with no configured rows yields no plan, so the loop stays silent."""
+    settings = _settings()
     registry = AdcDeviceRegistry(logging.getLogger("test.adc_service.poller.plan"))
     registry.rebuild(settings)
-    plan = poll_plan(registry)
 
-    assert [entry.channel for entry in plan["adc0"]] == list(range(8))
-    assert {entry.interval_ms for entry in plan["adc0"]} == {250}
+    assert poll_plan(registry) == {}
 
 
 def test_registry_generates_fake_geometry() -> None:

@@ -191,13 +191,18 @@ def test_channel_settings_reject_unknown_field() -> None:
         msgspec.convert({"channel": 0, "interval": 100}, AdcChannelSettings)
 
 
-def test_device_poll_defaults_and_channels() -> None:
-    """A device entry without polling fields samples every input every second."""
+def test_device_poll_defaults_and_empty_channels() -> None:
+    """A device entry opts into polling with no channel rows by default."""
     device = msgspec.convert({"type": "MCP3208"}, AdcDeviceSettings)
 
     assert device.poll is True
-    assert device.poll_interval_ms == 1000
     assert device.channels == []
+
+
+def test_device_rejects_poll_interval_field() -> None:
+    """The device-level sampling period is gone; only channel rows carry one."""
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.convert({"type": "MCP3208", "poll_interval_ms": 500}, AdcDeviceSettings)
 
 
 def test_service_poll_defaults() -> None:

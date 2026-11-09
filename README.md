@@ -67,6 +67,9 @@ devices:
     port: 0
     device: 0
     v_ref: 3.3
+    channels:
+      - channel: 0
+        poll_interval_ms: 1000
   adc1:
     type: MCP3204
     device: 1
@@ -77,10 +80,15 @@ poll_enabled: true
 
 Per-device fields: `type` (required, `MCP3204` or `MCP3208`), `port` and `device`
 for the SPI wiring, `clock_pin`/`mosi_pin`/`miso_pin`/`select_pin` for the
-gpiozero backend, `v_ref`, `label`, `log_level`, and `poll` (default `true`).
-`port` is the SPI bus number and `device` is the chip-select; both are integers.
-Top-level fields: `devices` and `poll_enabled` (default `true`). Unknown fields
-are rejected.
+gpiozero backend, `v_ref`, `label`, `log_level`, `poll` (default `true`), and
+`channels` (per-input polling rows; an empty list means the device is not
+polled). `port` is the SPI bus number and `device` is the chip-select; both are
+integers. Top-level fields: `devices` and `poll_enabled` (default `true`).
+Unknown fields are rejected.
+
+Each `channels` row carries `channel`, `poll_interval_ms` (default `1000`),
+`enabled` (default `true`), and `label`. There is no device-level period: a
+device stays silent until its rows are defined.
 
 ## Tasks
 
@@ -99,9 +107,10 @@ configured but failed to open is a successful `adc:list` entry with
 
 The worker publishes to `scietex:{service}:{instance_id}:telemetry` every 2 s
 with a 6 s TTL. The snapshot lists every configured device with its open state,
-`v_ref`, channel counts, and `poll` flag, plus the service-wide `poll_enabled`
-switch. Polling is opt-out both per device (`poll: false`) and globally
-(`poll_enabled: false`).
+`v_ref`, `channel_count`, and `poll` flag, plus the service-wide `poll_enabled`
+switch. `channel_count` is absent for a device that failed to open. Polling is
+opt-out both per device (`poll: false`) and globally (`poll_enabled: false`), and
+a device stays silent until it has explicit `channels` rows.
 
 ## Container and quadlet
 

@@ -286,25 +286,20 @@ def test_registry_logs_close_failure(registry: AdcDeviceRegistry, fake_parts: No
     assert registry.get("adc0").v_ref == 3.3
 
 
-def test_poll_plan_empty_channels_expands_every_input(registry: AdcDeviceRegistry, fake_parts: None) -> None:
-    """An empty ``channels`` list samples every single-ended input at the device period."""
-    registry.rebuild(AdcServiceSettings(devices={"adc0": AdcDeviceSettings(type="FAKE", poll_interval_ms=250)}))
+def test_poll_plan_empty_channels_is_not_polled(registry: AdcDeviceRegistry, fake_parts: None) -> None:
+    """A device with no channel rows is silent: inputs are sampled only via rows."""
+    registry.rebuild(AdcServiceSettings(devices={"adc0": AdcDeviceSettings(type="FAKE")}))
 
-    plan = poll_plan(registry)
-
-    assert [entry.channel for entry in plan["adc0"]] == list(range(8))
-    assert {entry.interval_ms for entry in plan["adc0"]} == {250}
-    assert {entry.label for entry in plan["adc0"]} == {None}
+    assert poll_plan(registry) == {}
 
 
 def test_poll_plan_explicit_rows_override_period_and_carry_labels(registry: AdcDeviceRegistry, fake_parts: None) -> None:
-    """A channel row wins over the device fallback and keeps its label."""
+    """Each explicit row carries its own period and label."""
     registry.rebuild(
         AdcServiceSettings(
             devices={
                 "adc0": AdcDeviceSettings(
                     type="FAKE",
-                    poll_interval_ms=1000,
                     channels=[
                         AdcChannelSettings(channel=2, poll_interval_ms=100, label="cell"),
                         AdcChannelSettings(channel=5),
@@ -349,8 +344,8 @@ def test_poll_plan_skips_poll_false_and_disabled_service(registry: AdcDeviceRegi
     """Neither a device opt-out nor the service switch produces a plan."""
     settings = AdcServiceSettings(
         devices={
-            "polled": AdcDeviceSettings(type="FAKE"),
-            "manual": AdcDeviceSettings(type="FAKE", poll=False),
+            "polled": AdcDeviceSettings(type="FAKE", channels=[AdcChannelSettings(channel=0)]),
+            "manual": AdcDeviceSettings(type="FAKE", poll=False, channels=[AdcChannelSettings(channel=0)]),
         }
     )
     registry.rebuild(settings)
@@ -360,8 +355,8 @@ def test_poll_plan_skips_poll_false_and_disabled_service(registry: AdcDeviceRegi
     registry.rebuild(
         AdcServiceSettings(
             devices={
-                "polled": AdcDeviceSettings(type="FAKE"),
-                "manual": AdcDeviceSettings(type="FAKE", poll=False),
+                "polled": AdcDeviceSettings(type="FAKE", channels=[AdcChannelSettings(channel=0)]),
+                "manual": AdcDeviceSettings(type="FAKE", poll=False, channels=[AdcChannelSettings(channel=0)]),
             },
             poll_enabled=False,
         )

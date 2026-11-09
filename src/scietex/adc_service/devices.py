@@ -298,6 +298,14 @@ class AdcDeviceRegistry:
             raise DeviceUnavailable(device_id, "configured but not open; rebuild to retry")
         raise DeviceNotFound(f"Device {device_id!r} is not configured; known ids: {self.ids()}")
 
+    def opened(self, device_id: str) -> hal.ADC | None:
+        """Return the open device under ``device_id``, or ``None`` when it is not open.
+
+        Unlike `get`, this never raises: telemetry needs the live geometry of a
+        device that opened and must skip one that did not.
+        """
+        return self._devices.get(device_id)
+
     def channel(self, device_id: str, index: int) -> hal.ADCChannel:
         """Return single-ended channel ``index`` of ``device_id``.
 
@@ -443,9 +451,9 @@ def poll_plan(
     with ``poll=False``, an unopened device, and (service-wide)
     ``poll_enabled=False`` never reach the plan. Per device:
 
-    * an empty ``channels`` list samples every single-ended input the HAL part
-      reports, at the device ``poll_interval_ms``;
-    * an explicit channel row overrides that period and an ``enabled=False``
+    * an empty ``channels`` list yields no plan at all — the device is not
+      sampled until explicit rows are configured;
+    * an explicit channel row sets that input's period, and an ``enabled=False``
       row is dropped;
     * a row naming an input the part does not have is dropped with a warning,
       because it could only fail on every tick;
@@ -481,11 +489,14 @@ def _device_plan(
     cfg: AdcDeviceSettings,
     logger: logging.Logger,
 ) -> list[AdcChannelPlan]:
-    """Per-channel plan for one open device, with clamping and drops applied."""
+    """Per-channel plan for one open device, with clamping and drops applied.
+
+    Only explicit rows produce a plan: an empty ``channels`` list returns an
+    empty plan, so an unconfigured device is not sampled at all.
+    """
     limit = len(device.channels)
     if not cfg.channels:
-        interval = _clamp_interval(device_id, cfg.poll_interval_ms, logger)
-        return [AdcChannelPlan(channel, interval) for channel in range(limit)]
+        return []
 
     plans: list[AdcChannelPlan] = []
     seen: set[int] = set()

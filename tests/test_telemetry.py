@@ -109,6 +109,7 @@ async def test_build_telemetry_reports_channels_and_states(fake_parts) -> None:
     polled = payload["devices"]["adc0"]
     assert polled["state"] == "ok"
     assert polled["type"] == "FAKE"
+    assert polled["channel_count"] == 8
     assert polled["last_error"] is None
     assert polled["last_ok"] is not None
     channel = polled["channels"]["2"]
@@ -118,6 +119,7 @@ async def test_build_telemetry_reports_channels_and_states(fake_parts) -> None:
     assert channel["error"] is None
     stopped = payload["devices"]["adc1"]
     assert stopped["state"] == "stopped"
+    assert stopped["channel_count"] == 8
     assert stopped["channels"] == {}
 
 
@@ -139,6 +141,7 @@ async def test_build_telemetry_reports_open_failure(fake_parts) -> None:
     assert "SPI bus is gone" in device["last_error"]
     assert device["last_ok"] is None
     assert device["channels"] == {}
+    assert "channel_count" not in device
 
 
 @pytest.mark.asyncio

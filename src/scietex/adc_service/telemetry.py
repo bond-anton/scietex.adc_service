@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 from .poller import STATE_ERROR, STATE_OK, STATE_STOPPED
 
 if TYPE_CHECKING:
+    from scietex.hal import adc as hal
+
     from .adc_worker import AdcWorker
     from .poller import AdcChannelState, AdcDeviceState
 
@@ -28,9 +30,10 @@ if TYPE_CHECKING:
 TELEMETRY_INTERVAL: float = 2.0
 TELEMETRY_TTL: int = 6
 
-#: Payload revision: 2 added the service/device states and the per-channel
-#: snapshots on top of the open-device list of revision 1.
-SCHEMA_VERSION: int = 2
+#: Payload revision: 3 added ``channel_count`` to every open device; 2 added
+#: the service/device states and the per-channel snapshots on top of the
+#: open-device list of revision 1.
+SCHEMA_VERSION: int = 3
 
 
 def _isoformat(value: datetime | None) -> str | None:
@@ -54,6 +57,7 @@ def _channel_payload(state: AdcChannelState) -> dict[str, Any]:
 
 def _device_payload(
     cfg: Any | None,
+    device: hal.ADC | None,
     state: AdcDeviceState | None,
     open_error: str | None,
 ) -> dict[str, Any]:
@@ -62,6 +66,10 @@ def _device_payload(
     A device that failed to open is an error regardless of the poll snapshot it
     never got: the recorded open error is the reason the operator needs. A
     configured device the poller does not sample reports ``stopped``.
+
+    ``channel_count`` is the part's single-ended input count and is published
+    only for a device that actually opened; a device that failed to open has no
+    live geometry to report.
     """
     if open_error is not None:
         device_state = STATE_ERROR
@@ -72,7 +80,7 @@ def _device_payload(
     else:
         device_state = STATE_STOPPED
         last_error = None
-    return {
+    payload = {
         "state": device_state,
         "type": cfg.type if cfg is not None else None,
         "last_error": last_error,
@@ -81,6 +89,9 @@ def _device_payload(
             str(index): _channel_payload(channel) for index, channel in sorted((state.channels if state else {}).items())
         },
     }
+    if device is not None:
+        payload["channel_count"] = len(device.channels)
+    return payload
 
 
 def _service_state(devices: dict[str, dict[str, Any]]) -> str:
@@ -99,7 +110,8 @@ def build_telemetry(worker: AdcWorker) -> dict[str, Any]:
     ``configured`` is False only before the first settings resolution; the
     default struct has no devices but is a valid configuration. A device that
     is configured but failed to open is reported as ``error`` with the recorded
-    reason, so one missing converter does not hide the others.
+    reason, so one missing converter does not hide the others. Every open
+    device also carries ``channel_count``, the part's single-ended input count.
     """
     settings = worker.adc_settings
     registry = worker.devices
@@ -108,7 +120,12 @@ def build_telemetry(worker: AdcWorker) -> dict[str, Any]:
     devices: dict[str, dict[str, Any]] = {}
     for device_id in registry.ids():
         cfg = settings.devices.get(device_id) if settings is not None else None
-        devices[device_id] = _device_payload(cfg, states.get(device_id), errors.get(device_id))
+        devices[device_id] = _device_payload(
+            cfg,
+            registry.opened(device_id),
+            states.get(device_id),
+            errors.get(device_id),
+        )
     return {
         "service": worker.service_name,
         "instance_id": worker.instance_id,

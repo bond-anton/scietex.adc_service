@@ -11,6 +11,7 @@ from scietex.adc_service.config import (
     ADC_CONFIG_FILE,
     ADC_CONFIG_SUBDIR,
     ADC_SECTION,
+    AdcChannelSettings,
     AdcDeviceSettings,
     AdcServiceSettings,
 )
@@ -142,7 +143,7 @@ def test_apply_hook_stores_without_rebuild_before_startup(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_apply_hook_rebuilds_after_startup(tmp_path, fake_parts, fake_bootstrap, skip_valkey) -> None:
     """A config delivery after startup rebuilds the live registry and poll tasks."""
-    fake_bootstrap({"devices": {"a": {"type": "FAKE"}}})
+    fake_bootstrap({"devices": {"a": {"type": "FAKE", "channels": [{"channel": 0}]}}})
     worker = _make_worker(tmp_path)
     assert await worker.initialize() is True
     assert worker.devices.generation == 1
@@ -151,8 +152,8 @@ async def test_apply_hook_rebuilds_after_startup(tmp_path, fake_parts, fake_boot
 
     applied = AdcServiceSettings(
         devices={
-            "a": AdcDeviceSettings(type="FAKE"),
-            "b": AdcDeviceSettings(type="FAKE", v_ref=5.0),
+            "a": AdcDeviceSettings(type="FAKE", channels=[AdcChannelSettings(channel=0)]),
+            "b": AdcDeviceSettings(type="FAKE", v_ref=5.0, channels=[AdcChannelSettings(channel=0)]),
         }
     )
     worker._apply_adc_settings(applied)
@@ -171,14 +172,14 @@ async def test_apply_hook_rebuilds_after_startup(tmp_path, fake_parts, fake_boot
 @pytest.mark.asyncio
 async def test_apply_keeps_unbuildable_device_in_telemetry(tmp_path, fake_parts, fake_bootstrap, skip_valkey) -> None:
     """A device that fails to build gets no poll task but stays as an error entry."""
-    fake_bootstrap({"devices": {"good": {"type": "FAKE"}}})
+    fake_bootstrap({"devices": {"good": {"type": "FAKE", "channels": [{"channel": 0}]}}})
     worker = _make_worker(tmp_path)
     assert await worker.initialize() is True
 
     worker._apply_adc_settings(
         AdcServiceSettings(
             devices={
-                "good": AdcDeviceSettings(type="FAKE"),
+                "good": AdcDeviceSettings(type="FAKE", channels=[AdcChannelSettings(channel=0)]),
                 "bad": AdcDeviceSettings(type="BROKEN"),
             }
         )

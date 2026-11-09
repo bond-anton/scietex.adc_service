@@ -44,8 +44,7 @@ class AdcChannelSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     """One sampled input of a device, keyed by its index in the part's geometry.
 
     ``channel`` is the single-ended input index (the same number ``adc:read``
-    takes). ``poll_interval_ms`` is the per-channel sampling period; the device
-    field of the same name is the fallback for a channel with no explicit row.
+    takes). ``poll_interval_ms`` is this input's sampling period.
     ``enabled=False`` keeps the input readable on demand while excluding it
     from the poll plan.
     """
@@ -68,9 +67,11 @@ class AdcDeviceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True)
     ``poll`` is service-level, not a HAL argument: it excludes a device from
     `devices.poll_plan` while keeping it addressable for on-demand reads.
 
-    ``poll_interval_ms`` is the sampling period for a channel that has no
-    explicit `AdcChannelSettings` row; an empty ``channels`` list samples every
-    input the HAL part reports at that period.
+    An input is sampled only through an explicit `AdcChannelSettings` row in
+    ``channels``: an empty list means the device is not polled at all, so a
+    freshly configured converter stays silent until its rows are defined.
+    On-demand reads through ``adc:read`` and ``adc:read_all`` keep working
+    regardless.
     """
 
     type: str
@@ -84,7 +85,6 @@ class AdcDeviceSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True)
     label: str | None = None
     log_level: str | None = None
     poll: bool = True
-    poll_interval_ms: int = 1000
     channels: list[AdcChannelSettings] = msgspec.field(default_factory=list)
 
 

@@ -104,10 +104,28 @@ Every entry under `devices` is an `AdcDeviceSettings`:
 | `label` | string or null | `null` | Human-readable label forwarded to the HAL |
 | `log_level` | string or null | `null` | Per-device log level forwarded to the HAL |
 | `poll` | bool | `true` | Include this device in the background sweep |
+| `channels` | list | `[]` | Per-input polling rows; an empty list means the device is not polled |
 
 Fields left unset (`null` or absent) are not forwarded to the HAL constructor, so
 the class default applies; this keeps "not configured" distinct from "explicitly
 disabled".
+
+### Per-channel polling
+
+A device is sampled only through the rows in its `channels` list — an empty list
+means the device is not polled at all. On-demand reads (`adc:read`,
+`adc:read_all`) keep working regardless. Each row is an `AdcChannelSettings`:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `channel` | int | — (required) | Single-ended input index |
+| `poll_interval_ms` | int | `1000` | Sampling period for this input |
+| `enabled` | bool | `true` | Sample this input in the sweep |
+| `label` | string or null | `null` | Display label |
+
+There is no device-level period. A row naming an input the part does not have,
+or a duplicate row, is dropped with a warning; a period outside
+`[100, 3600000]` ms is clamped with a warning.
 
 ### Choosing a transport
 
